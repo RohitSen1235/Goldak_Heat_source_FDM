@@ -1,16 +1,17 @@
 material:
-  conductivity: 200.0  # W/m-K (e.g., for steel)
-  density: 8000.0      # kg/m³
+  conductivity: 180.0  # W/m-K (e.g., for steel)
+  density: 8000.0      # kg/m³  
   specific_heat: 500.0 # J/kg-K
+  melting_temperature: 750.0 # K (e.g., steel melting point)
 
 laser:
-  power: 200.0         # Watts
+  power: 250         # Watts
   spot_size: 1.0e-4    # meters (100 μm, explicitly as float)
-  position: [0.5e-3, 0.5e-3]  # Center of top surface
+  # position: [0.25e-3, 0.25e-3]  # Center of top surface
   reflectivity: 0.87    # % reflection (1- absorption)
 
 top_surface:
-  convective_cooling: false
+  convective_cooling: true
   h: 10.0              # W/m²K
   T_inf: 300.0         # K
 
@@ -24,15 +25,16 @@ boundaries:
   right:
     type: adiabatic
   bottom:
+    # type: adiabatic
     type: fixed
     fixed_temp: 300 # K
 
 simulation:
-  duration: 0.1        # seconds
+  duration: 0.3        # seconds
   output_interval: 0.01 # seconds
   max_dt: 1.0e-3       # seconds
+  solver_type: "cuda"  # Options: "auto", "cpu", "cuda"
 
-simulation:
-  duration: 0.1        # seconds
-  output_interval: 0.01 # seconds
-  max_dt: 1.0e-3       # seconds
+domain:
+  size: 1.0e-3         # meters (1mm)
+  points_per_dimension: 50  # Grid resolution

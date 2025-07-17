@@ -3,7 +3,21 @@ import yaml
 from enum import Enum
 from dataclasses import dataclass
 from typing import Dict, Optional
-from numba import njit  # For JIT compilation
+from numba import njit, prange, cuda  # For JIT compilation and parallel loops
+from numba.cuda import is_available as cuda_is_available
+
+@cuda.jit
+def _update_temperature_cuda(T, new_T, factor, N):
+    i, j, k = cuda.grid(ndim=3)
+    if 1 <= i < N-1 and 1 <= j < N-1 and 1 <= k < N-1:
+        neighbor_avg = (T[i+1,j,k] + T[i-1,j,k] +
+                      T[i,j+1,k] + T[i,j-1,k] +
+                      T[i,j,k+1] + T[i,j,k-1]) / 6.0
+        delta = (neighbor_avg - T[i,j,k]) * (factor * 6.0)
+        if abs(delta) > 1000:
+            # Manual sign calculation since np.sign isn't supported in CUDA
+            delta = (1.0 if delta > 0 else -1.0) * 1000
+        new_T[i,j,k] = T[i,j,k] + delta
 
 class BoundaryType(Enum):
     ADIABATIC = "adiabatic"
@@ -45,6 +59,15 @@ class SimulationConfig:
 class HeatSolver3D:
     def __init__(self, config_file: str):
         self.load_config(config_file)
+        self._cuda_available = cuda_is_available()
+        if not self._cuda_available:
+            print(f"Cuda solver requested but not available, falling back to cpu solver")
+
+        self.solver_type = self.config['simulation'].get('solver_type', 'auto')
+
+        if self.solver_type not in ('auto', 'cpu', 'cuda'):
+            raise ValueError("Invalid solver_type, must be 'auto', 'cpu' or 'cuda'")
+        
         self.initialize_grid()
         
     def load_config(self, config_file: str):
@@ -100,6 +123,7 @@ class HeatSolver3D:
         self.laser = LaserConfig(**laser_conf)
         self.simulation = SimulationConfig(**sim_conf)
         self.top_surface = TopSurfaceConfig(**top_conf)
+        self.config = config  # Store full config for later access
         
         self.boundaries = {}
         for face, bc_config in config['boundaries'].items():
@@ -111,10 +135,14 @@ class HeatSolver3D:
             )
             
     def initialize_grid(self):
-        self.N = 50  # Points per dimension
-        self.L = 1e-3  # Domain size (1mm)
+        self.N = self.config['domain']['points_per_dimension']  # Points per dimension
+        self.L = self.config['domain']['size']  # Domain size in meters
         self.dx = self.L / (self.N - 1)
         
+        # Update laser position to be centered
+        center = self.L / 2
+        self.laser.position = (center, center)
+        print( f" Laser position : {self.laser.position}")
         # Initialize temperature field (K)
         self.T = np.ones((self.N, self.N, self.N)) * 300.0  # Initial temp 300K
         
@@ -225,11 +253,12 @@ class HeatSolver3D:
                 print(f"Saved output at t = {t:.3e}s ({(t/self.simulation.duration)*100:.1f}% complete)")
             else:
                 print(f"Progress: t = {t:.3e}s ({(t/self.simulation.duration)*100:.1f}% complete)", end='\r')
-    
+
     def calculate_time_step(self) -> float:
         """Calculate stable time step"""
         max_dt = (self.dx**2) / (6 * self.alpha)
-        return min(max_dt, self.simulation.max_dt)
+        # return min(max_dt, self.simulation.max_dt)
+        return max_dt
     
     def update_temperature(self, dt: float):
         """Update temperature field using JIT-accelerated finite difference"""
@@ -238,8 +267,29 @@ class HeatSolver3D:
         if factor <= 0 or not np.isfinite(factor):
             raise ValueError(f"Invalid factor value: {factor}")
         
-        # Call Numba-optimized function
-        self.T = _update_temperature_numba(self.T, factor, self.N)
+        # Select implementation based on config
+        # Check CUDA availability if requested
+
+        if self.solver_type == 'cpu' or not self._cuda_available:
+            self.T = _update_temperature_cpu(self.T, factor, self.N)
+        else:
+            try:
+                d_T = cuda.to_device(self.T)
+                d_new_T = cuda.device_array_like(d_T)
+                threads = (8, 8, 8)
+                blocks = (
+                    (self.N + threads[0] - 1) // threads[0],
+                    (self.N + threads[1] - 1) // threads[1],
+                    (self.N + threads[2] - 1) // threads[2]
+                )
+                _update_temperature_cuda[blocks, threads](d_T, d_new_T, factor, self.N)
+                self.T = d_new_T.copy_to_host()
+            except Exception as e:
+                if self.solver_type == 'cuda':
+                    print(f"WARNING: CUDA solver failed ({str(e)}) - falling back to CPU")
+                else:
+                    print("WARNING: CUDA failed - falling back to CPU")
+                self.T = _update_temperature_cpu(self.T, factor, self.N)
         
         # Validate temperature values
         if np.isnan(self.T).any():
@@ -276,8 +326,8 @@ class HeatSolver3D:
         filename = f"output/timestep_{step:04d}"
         gridToVTK(filename, x, y, z, cellData={"temperature": self.T})
 
-@njit
-def _update_temperature_numba(T, factor, N):
+@njit(parallel=True, fastmath=True)
+def _update_temperature_cpu(T, factor, N):
     """Numba-optimized temperature update"""
     new_T = np.copy(T)
     
@@ -286,10 +336,11 @@ def _update_temperature_numba(T, factor, N):
     if alpha <= 1e-10:
         alpha = 1e-10  # Prevent division by extremely small numbers
     
-    # Update interior points with stability checks
+    # Update interior points with stability checks - parallelized
     for i in range(1, N-1):
         for j in range(1, N-1):
-            for k in range(1, N-1):
+            # prange enables parallelization of the outermost loop
+            for k in prange(1, N-1):
                 # Compute neighbor average
                 neighbor_avg = (T[i+1,j,k] + T[i-1,j,k] +
                               T[i,j+1,k] + T[i,j-1,k] +

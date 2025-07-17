@@ -13,18 +13,22 @@ def visualize_results():
     # Create a plotter
     plotter = pv.Plotter()
     
-    # Add all timesteps to the plotter
-    for file in files:
-        mesh = pv.read(file)
-        plotter.add_mesh(mesh, scalars='temperature', clim=[300, 500])
-    
-    # Store all meshes for animation
+    # Read all meshes
     meshes = [pv.read(file) for file in files]
+    
+    # Add all timesteps to the plotter
+    for mesh in meshes:
+        temp_min = mesh['temperature'].min()
+        temp_max = mesh['temperature'].max()
+        plotter.add_mesh(mesh, scalars='temperature', clim=[temp_min, temp_max])
     
     # Add controls for animation
     def update_mesh(value):
         idx = int(value)
-        plotter.update_scalars(meshes[idx]['temperature'])
+        current_mesh = meshes[idx]
+        temp_min = current_mesh['temperature'].min()
+        temp_max = current_mesh['temperature'].max()
+        plotter.update_scalars(current_mesh['temperature'])
     
     plotter.add_slider_widget(
         callback=update_mesh,

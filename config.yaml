@@ -5,12 +5,12 @@ material:
 
 laser:
   power: 200.0         # Watts
-  spot_size: 0.8e-4    # meters (100 μm, explicitly as float)
+  spot_size: 1.0e-4    # meters (100 μm, explicitly as float)
   position: [0.5e-3, 0.5e-3]  # Center of top surface
-  reflectivity: 0.87    # 30% reflection
+  reflectivity: 0.87    # % reflection (1- absorption)
 
 top_surface:
-  convective_cooling: true
+  convective_cooling: false
   h: 10.0              # W/m²K
   T_inf: 300.0         # K
 
@@ -18,16 +18,21 @@ boundaries:
   front:
     type: adiabatic
   back:
-    type: adiabatic
+    type: adiabatic  
   left:
     type: adiabatic
   right:
     type: adiabatic
   bottom:
     type: fixed
-    fixed_temp: 300.0  # K
+    fixed_temp: 300 # K
 
 simulation:
-  duration: 0.2        # seconds
+  duration: 0.1        # seconds
   output_interval: 0.01 # seconds
-  max_dt: 1.0e-4       # seconds
+  max_dt: 1.0e-3       # seconds
+
+simulation:
+  duration: 0.1        # seconds
+  output_interval: 0.01 # seconds
+  max_dt: 1.0e-3       # seconds

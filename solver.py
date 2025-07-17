@@ -3,6 +3,7 @@ import yaml
 from enum import Enum
 from dataclasses import dataclass
 from typing import Dict, Optional
+from numba import njit  # For JIT compilation
 
 class BoundaryType(Enum):
     ADIABATIC = "adiabatic"
@@ -141,12 +142,72 @@ class HeatSolver3D:
                 
                 # Optional convective cooling
                 if self.top_surface.convective_cooling:
-                    convective_term = (self.top_surface.h * self.dx / self.material.conductivity) * \
-                                    (self.T[i,j,-1] - self.top_surface.T_inf)
-                    self.T[i,j,-1] -= convective_term
+                    temp_diff = self.T[i,j,-1] - self.top_surface.T_inf
+                    if not np.isnan(temp_diff) and np.isfinite(temp_diff):
+                        convective_term = (self.top_surface.h * self.dx / self.material.conductivity) * temp_diff
+                        self.T[i,j,-1] -= convective_term
         
-        # Other boundaries (implementation depends on selected type)
-        # ... will be implemented in next steps
+        # Implement boundary conditions for all faces
+        for face, bc in self.boundaries.items():
+            if face == 'bottom':  # z=0
+                for i in range(self.N):
+                    for j in range(self.N):
+                        if bc.type == BoundaryType.FIXED:
+                            self.T[i,j,0] = bc.fixed_temp
+                        elif bc.type == BoundaryType.ADIABATIC:
+                            self.T[i,j,0] = self.T[i,j,1]
+                        elif bc.type == BoundaryType.CONVECTIVE:
+                            conv_term = (bc.h * self.dx / self.material.conductivity) * \
+                                       (self.T[i,j,0] - bc.T_inf)
+                            self.T[i,j,0] = self.T[i,j,1] + conv_term
+            
+            elif face == 'front':  # y=0
+                for i in range(self.N):
+                    for k in range(self.N):
+                        if bc.type == BoundaryType.FIXED:
+                            self.T[i,0,k] = bc.fixed_temp
+                        elif bc.type == BoundaryType.ADIABATIC:
+                            self.T[i,0,k] = self.T[i,1,k]
+                        elif bc.type == BoundaryType.CONVECTIVE:
+                            conv_term = (bc.h * self.dx / self.material.conductivity) * \
+                                       (self.T[i,0,k] - bc.T_inf)
+                            self.T[i,0,k] = self.T[i,1,k] + conv_term
+            
+            elif face == 'back':  # y=L
+                for i in range(self.N):
+                    for k in range(self.N):
+                        if bc.type == BoundaryType.FIXED:
+                            self.T[i,-1,k] = bc.fixed_temp
+                        elif bc.type == BoundaryType.ADIABATIC:
+                            self.T[i,-1,k] = self.T[i,-2,k]
+                        elif bc.type == BoundaryType.CONVECTIVE:
+                            conv_term = (bc.h * self.dx / self.material.conductivity) * \
+                                       (self.T[i,-1,k] - bc.T_inf)
+                            self.T[i,-1,k] = self.T[i,-2,k] + conv_term
+            
+            elif face == 'left':  # x=0
+                for j in range(self.N):
+                    for k in range(self.N):
+                        if bc.type == BoundaryType.FIXED:
+                            self.T[0,j,k] = bc.fixed_temp
+                        elif bc.type == BoundaryType.ADIABATIC:
+                            self.T[0,j,k] = self.T[1,j,k]
+                        elif bc.type == BoundaryType.CONVECTIVE:
+                            conv_term = (bc.h * self.dx / self.material.conductivity) * \
+                                       (self.T[0,j,k] - bc.T_inf)
+                            self.T[0,j,k] = self.T[1,j,k] + conv_term
+            
+            elif face == 'right':  # x=L
+                for j in range(self.N):
+                    for k in range(self.N):
+                        if bc.type == BoundaryType.FIXED:
+                            self.T[-1,j,k] = bc.fixed_temp
+                        elif bc.type == BoundaryType.ADIABATIC:
+                            self.T[-1,j,k] = self.T[-2,j,k]
+                        elif bc.type == BoundaryType.CONVECTIVE:
+                            conv_term = (bc.h * self.dx / self.material.conductivity) * \
+                                       (self.T[-1,j,k] - bc.T_inf)
+                            self.T[-1,j,k] = self.T[-2,j,k] + conv_term
     
     def solve(self):
         """Main solver loop"""
@@ -171,26 +232,37 @@ class HeatSolver3D:
         return min(max_dt, self.simulation.max_dt)
     
     def update_temperature(self, dt: float):
-        """Update temperature field using explicit finite difference"""
-        new_T = np.copy(self.T)
+        """Update temperature field using JIT-accelerated finite difference"""
+        # Pre-calculate constants
+        factor = dt * self.alpha / (self.dx**2)
+        if factor <= 0 or not np.isfinite(factor):
+            raise ValueError(f"Invalid factor value: {factor}")
         
-        # Update interior points
-        for i in range(1, self.N-1):
-            for j in range(1, self.N-1):
-                for k in range(1, self.N-1):
-                    d2T_dx2 = (self.T[i+1,j,k] - 2*self.T[i,j,k] + self.T[i-1,j,k]) / (self.dx**2)
-                    d2T_dy2 = (self.T[i,j+1,k] - 2*self.T[i,j,k] + self.T[i,j-1,k]) / (self.dx**2)
-                    d2T_dz2 = (self.T[i,j,k+1] - 2*self.T[i,j,k] + self.T[i,j,k-1]) / (self.dx**2)
-                    
-                    new_T[i,j,k] = self.T[i,j,k] + dt * self.alpha * (d2T_dx2 + d2T_dy2 + d2T_dz2)
+        # Call Numba-optimized function
+        self.T = _update_temperature_numba(self.T, factor, self.N)
         
-        self.T = new_T
+        # Validate temperature values
+        if np.isnan(self.T).any():
+            nan_count = np.isnan(self.T).sum()
+            raise RuntimeError(f"NaN values detected in temperature field ({nan_count} points)")
+        if not np.isfinite(self.T).all():
+            inf_count = (~np.isfinite(self.T)).sum()
+            raise RuntimeError(f"Non-finite values detected in temperature field ({inf_count} points)")
+        
         self.apply_boundary_conditions()
-    
+        
     def save_output(self, step: int):
         """Save output in VTK format for ParaView"""
         import os
         from pyevtk.hl import gridToVTK
+        
+        # Validate before saving
+        if np.isnan(self.T).any():
+            nan_count = np.isnan(self.T).sum()
+            raise RuntimeError(f"Cannot save output - temperature field contains {nan_count} NaN values")
+        if not np.isfinite(self.T).all():
+            inf_count = (~np.isfinite(self.T)).sum()
+            raise RuntimeError(f"Cannot save output - temperature field contains {inf_count} non-finite values")
         
         # Create output directory if needed
         os.makedirs("output", exist_ok=True)
@@ -203,6 +275,35 @@ class HeatSolver3D:
         # Save as VTK file
         filename = f"output/timestep_{step:04d}"
         gridToVTK(filename, x, y, z, cellData={"temperature": self.T})
+
+@njit
+def _update_temperature_numba(T, factor, N):
+    """Numba-optimized temperature update"""
+    new_T = np.copy(T)
+    
+    # More stable computation avoiding large dx2_inv
+    alpha = factor * 6.0
+    if alpha <= 1e-10:
+        alpha = 1e-10  # Prevent division by extremely small numbers
+    
+    # Update interior points with stability checks
+    for i in range(1, N-1):
+        for j in range(1, N-1):
+            for k in range(1, N-1):
+                # Compute neighbor average
+                neighbor_avg = (T[i+1,j,k] + T[i-1,j,k] +
+                              T[i,j+1,k] + T[i,j-1,k] +
+                              T[i,j,k+1] + T[i,j,k-1]) / 6.0
+                
+                # Stable update using limited difference
+                delta = (neighbor_avg - T[i,j,k]) * alpha
+                if abs(delta) > 1000:  # Limit large changes
+                    delta = np.sign(delta) * 1000
+                new_T[i,j,k] = T[i,j,k] + delta
+    
+    return new_T
+
+
 
 if __name__ == "__main__":
     solver = HeatSolver3D("config.yaml")

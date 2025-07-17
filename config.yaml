@@ -1,0 +1,33 @@
+material:
+  conductivity: 200.0  # W/m-K (e.g., for steel)
+  density: 8000.0      # kg/m³
+  specific_heat: 500.0 # J/kg-K
+
+laser:
+  power: 200.0         # Watts
+  spot_size: 0.8e-4    # meters (100 μm, explicitly as float)
+  position: [0.5e-3, 0.5e-3]  # Center of top surface
+  reflectivity: 0.87    # 30% reflection
+
+top_surface:
+  convective_cooling: true
+  h: 10.0              # W/m²K
+  T_inf: 300.0         # K
+
+boundaries:
+  front:
+    type: adiabatic
+  back:
+    type: adiabatic
+  left:
+    type: adiabatic
+  right:
+    type: adiabatic
+  bottom:
+    type: fixed
+    fixed_temp: 300.0  # K
+
+simulation:
+  duration: 0.2        # seconds
+  output_interval: 0.01 # seconds
+  max_dt: 1.0e-4       # seconds

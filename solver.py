@@ -8,6 +8,14 @@ from numba.cuda import is_available as cuda_is_available
 
 @cuda.jit
 def _update_temperature_cuda(T, new_T, factor, N):
+    """
+    CUDA kernel for temperature update
+    Args:
+        T: Input temperature field (3D array)
+        new_T: Output temperature field (3D array)
+        factor: Thermal diffusion factor
+        N: Grid dimension size
+    """
     i, j, k = cuda.grid(ndim=3)
     if 1 <= i < N-1 and 1 <= j < N-1 and 1 <= k < N-1:
         neighbor_avg = (T[i+1,j,k] + T[i-1,j,k] +
@@ -282,7 +290,7 @@ class HeatSolver3D:
                     (self.N + threads[1] - 1) // threads[1],
                     (self.N + threads[2] - 1) // threads[2]
                 )
-                _update_temperature_cuda[blocks, threads](d_T, d_new_T, factor, self.N)
+                _update_temperature_cuda[blocks, threads](d_T, d_new_T, float(factor), self.N)
                 self.T = d_new_T.copy_to_host()
             except Exception as e:
                 if self.solver_type == 'cuda':
@@ -301,6 +309,50 @@ class HeatSolver3D:
         
         self.apply_boundary_conditions()
         
+    def calculate_meltpool_dimensions(self, melting_temp: float = None) -> dict:
+        """Calculate meltpool dimensions (length, width, depth) in meters.
+        
+        Args:
+            melting_temp: Optional override of melting temperature (K)
+            
+        Returns:
+            Dictionary with keys: length, width, depth (in meters)
+        """
+        if melting_temp is None:
+            melting_temp = self.config['material']['melting_temperature']
+        
+        # Find all cells above melting temperature
+        melt_cells = np.where(self.T > melting_temp)
+        
+        if len(melt_cells[0]) == 0:
+            return {'length': 0, 'width': 0, 'depth': 0}
+        
+        # Get laser center in grid coordinates
+        center_x, center_y = self.laser.position
+        center_i = int(center_x / self.dx)
+        center_j = int(center_y / self.dx)
+        
+        # Calculate max distances from center in each dimension
+        i_coords = melt_cells[0]
+        j_coords = melt_cells[1] 
+        k_coords = melt_cells[2]
+        
+        length = (np.max(i_coords) - np.min(i_coords)) * self.dx
+        width = (np.max(j_coords) - np.min(j_coords)) * self.dx
+        depth = (np.max(k_coords) - np.min(k_coords)) * self.dx
+        
+        print({
+            'length': float(length*1.0e6),
+            'width': float(width*1.0e6),
+            'depth': float(depth*1.0e6)
+        })
+
+        return {
+            'length': length,
+            'width': width,
+            'depth': depth
+        }
+
     def save_output(self, step: int):
         """Save output in VTK format for ParaView"""
         import os
@@ -359,3 +411,4 @@ def _update_temperature_cpu(T, factor, N):
 if __name__ == "__main__":
     solver = HeatSolver3D("config.yaml")
     solver.solve()
+    solver.calculate_meltpool_dimensions()

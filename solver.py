@@ -204,7 +204,7 @@ class HeatSolver3D:
         """Calculate double ellipsoid heat source at point (x,y,z) using Goldak model"""
         x0, y0 = self.double_ellipsoid.position
         x_rel = x - x0  # Relative x position
-        
+        y_rel = y- y0
         # Convert all lengths to mm for calculation (Goldak model expects mm)
         a_f_mm = self.double_ellipsoid.a_f * 1000
         a_r_mm = self.double_ellipsoid.a_r * 1000
@@ -214,7 +214,7 @@ class HeatSolver3D:
         y_mm = (y - y0) * 1000
         z_mm = z * 1000
         
-        if x_rel >= 0:  # Front half
+        if y_rel >= 0:  # Front half
             a = a_f_mm
             f = self.double_ellipsoid.f_f
         else:  # Rear half
@@ -265,7 +265,7 @@ class HeatSolver3D:
                 x = i * self.dx
                 y = j * self.dx
                 if  self.double_ellipsoid.enabled:
-                    heat_flux = (1- self.laser.reflectivity) * self.double_ellipsoid_source(x, y,self.dx * (self.N-1))
+                    heat_flux = (1- self.laser.reflectivity) * self.double_ellipsoid_source(x, y, 1.0e-3)
                 else:
                     # heat_flux = (1- self.config["laser"]["reflectivity"]) *  self.gaussian_laser_source(x, y)
                     heat_flux = (1- self.laser.reflectivity) *  self.gaussian_laser_source(x, y)
@@ -365,6 +365,26 @@ class HeatSolver3D:
         # return min(max_dt, self.simulation.max_dt)
         return max_dt
     
+    @staticmethod
+    @njit(parallel=True)
+    def _apply_heat_source_cpu(T, N, dx, position, a_f, a_r, b, c, f_f, f_r, Q, reflectivity, dt, density, specific_heat):
+        """Numba-optimized heat source application"""
+        for i in prange(1, N-1):
+            for j in range(1, N-1):
+                for k in range(1, N-1):
+                    x = i * dx
+                    y = j * dx
+                    z = k * dx
+                    # Only apply heat within ellipsoid bounds
+                    if ((x-position[0])**2/a_f**2 + 
+                        (y-position[1])**2/b**2 +
+                        z**2/c**2) <= 1:
+                        # Call the standalone double_ellipsoid_source function
+                        heat_flux = (1 - reflectivity) * double_ellipsoid_source(
+                            x, y, z, position, a_f, a_r, b, c, f_f, f_r, Q, reflectivity)
+                        T[i,j,k] += heat_flux * dt / (density * specific_heat)
+        return T
+
     def update_temperature(self, dt: float):
         """Update temperature field using JIT-accelerated finite difference"""
         # Pre-calculate constants
@@ -396,18 +416,25 @@ class HeatSolver3D:
         
         # Apply volumetric heat source if double ellipsoid is enabled
         if self.double_ellipsoid.enabled:
-            for i in range(1, self.N-1):
-                for j in range(1, self.N-1):
-                    for k in range(1, self.N-1):
-                        x = i * self.dx
-                        y = j * self.dx
-                        z = k * self.dx
-                        # Only apply heat within ellipsoid bounds
-                        if ((x-self.double_ellipsoid.position[0])**2/self.double_ellipsoid.a_f**2 + 
-                            (y-self.double_ellipsoid.position[1])**2/self.double_ellipsoid.b**2 +
-                            z**2/self.double_ellipsoid.c**2) <= 1:
-                            heat_flux = (1 - self.laser.reflectivity) * self.double_ellipsoid_source(x, y, z)
-                            self.T[i,j,k] += heat_flux * dt / (self.material.density * self.material.specific_heat)
+            # if self.solver_type == 'cpu' or not self._cuda_available:
+            self.T = self._apply_heat_source_cpu(
+                self.T, self.N, self.dx, 
+                self.double_ellipsoid.position,
+                self.double_ellipsoid.a_f,
+                self.double_ellipsoid.a_r,
+                self.double_ellipsoid.b,
+                self.double_ellipsoid.c,
+                self.double_ellipsoid.f_f,
+                self.double_ellipsoid.f_r,
+                self.double_ellipsoid.Q,
+                self.laser.reflectivity,
+                dt,
+                self.material.density,
+                self.material.specific_heat
+            )
+            # else:
+            #     # TODO: Add CUDA version
+            #     pass
 
         # Validate temperature values
         if np.isnan(self.T).any():
@@ -487,6 +514,43 @@ class HeatSolver3D:
         # Save as VTK file
         filename = f"output/timestep_{step:04d}"
         gridToVTK(filename, x, y, z, cellData={"temperature": self.T})
+
+@njit(fastmath=True)
+def double_ellipsoid_source(x: float, y: float, z: float, 
+                          position: tuple[float, float],
+                          a_f: float, a_r: float, b: float, c: float,
+                          f_f: float, f_r: float, Q: float, reflectivity: float) -> float:
+    """Numba-compatible version of double_ellipsoid_source"""
+    x0, y0 = position
+    x_rel = x - x0  # Relative x position
+    
+    # Convert all lengths to mm for calculation (Goldak model expects mm)
+    a_f_mm = a_f * 1000
+    a_r_mm = a_r * 1000
+    b_mm = b * 1000
+    c_mm = c * 1000
+    x_rel_mm = x_rel * 1000
+    y_mm = (y - y0) * 1000
+    z_mm = z * 1000
+    
+    if x_rel >= 0:  # Front half
+        a = a_f_mm
+        f = f_f
+    else:  # Rear half
+        a = a_r_mm
+        f = f_r
+        
+    term1 = -3 * (x_rel_mm/a)**2
+    term2 = -3 * (y_mm/b_mm)**2
+    term3 = -3 * (z_mm/c_mm)**2
+    
+    # Calculate heat flux density in W/mm³
+    numerator = 6 * np.sqrt(3) * f * Q * reflectivity
+    denominator = np.pi * a * b_mm * c_mm
+    q_mm3 = (numerator/denominator) * np.exp(term1 + term2 + term3)
+    
+    # Convert to W/m³ for consistency with other units
+    return q_mm3 * 1.0e9
 
 @njit(parallel=True, fastmath=True)
 def _update_temperature_cpu(T, factor, N):

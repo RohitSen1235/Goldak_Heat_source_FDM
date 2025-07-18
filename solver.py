@@ -57,9 +57,11 @@ class DoubleEllipsoidConfig:
     enabled: bool
     Q: float  # Total power (W)
     a_f: float  # Front ellipsoid radius (m)
+    a_r: float  # Rear ellipsoid radius (m)
     b: float  # y-axis radius (m)
     c: float  # z-axis radius (m)
     f_f: float  # Front fraction of power
+    f_r: float  # Rear fraction of power
     position: tuple[float, float]  # (x,y) in meters
 
 @dataclass
@@ -128,11 +130,16 @@ class HeatSolver3D:
             'enabled': to_bool(config['double_ellipsoid']['enabled']),
             'Q': to_float(config['double_ellipsoid']['Q']),
             'a_f': to_float(config['double_ellipsoid']['a_f']),
+            'a_r': to_float(config['double_ellipsoid'].get('a_r', config['double_ellipsoid']['a_f'])),
             'b': to_float(config['double_ellipsoid']['b']),
             'c': to_float(config['double_ellipsoid']['c']),
             'f_f': to_float(config['double_ellipsoid']['f_f']),
+            'f_r': to_float(config['double_ellipsoid'].get('f_r', 2.0 - float(config['double_ellipsoid']['f_f']))),
             'position': tuple(to_float(x) for x in config['double_ellipsoid']['position'])
         }
+        # Validate f_f + f_r = 2
+        if not np.isclose(ellipsoid_conf['f_f'] + ellipsoid_conf['f_r'], 2.0, atol=1e-6):
+            raise ValueError("f_f + f_r must equal 2.0 in double ellipsoid configuration")
 
         # Parse simulation config
         sim_conf = {
@@ -179,6 +186,13 @@ class HeatSolver3D:
         # Calculate thermal diffusivity
         self.alpha = self.material.conductivity / (self.material.density * self.material.specific_heat)
         
+        # # Apply initial heat source if double ellipsoid is enabled
+        # if self.double_ellipsoid.enabled:
+        #     self.apply_initial_heat_source()
+        #     # Debug print temperature range
+        #     print(f"Initial temperature range: {self.T.min():.1f}K to {self.T.max():.1f}K")
+        #     print(f"Max heat source temp: {self.T.max() - 300:.1f}K above ambient")
+        
     def gaussian_laser_source(self, x: float, y: float) -> float:
         """Calculate laser intensity at point (x,y)"""
         x0, y0 = self.laser.position
@@ -187,50 +201,84 @@ class HeatSolver3D:
         return I0 * np.exp(-2 * ((x-x0)**2 + (y-y0)**2) / w**2)
 
     def double_ellipsoid_source(self, x: float, y: float, z: float) -> float:
-        """Calculate double ellipsoid heat source at point (x,y,z)"""
+        """Calculate double ellipsoid heat source at point (x,y,z) using Goldak model"""
         x0, y0 = self.double_ellipsoid.position
-        term1 = -3 * ((x-x0)/self.double_ellipsoid.a_f)**2
-        term2 = -3 * ((y-y0)/self.double_ellipsoid.b)**2
-        term3 = -3 * (z/self.double_ellipsoid.c)**2
-        numerator = 6 * np.sqrt(3) * self.double_ellipsoid.f_f * self.double_ellipsoid.Q
-        denominator = np.pi * self.double_ellipsoid.a_f * self.double_ellipsoid.b * self.double_ellipsoid.c
-        return (numerator/denominator) * np.exp(term1 + term2 + term3)
+        x_rel = x - x0  # Relative x position
+        
+        # Convert all lengths to mm for calculation (Goldak model expects mm)
+        a_f_mm = self.double_ellipsoid.a_f * 1000
+        a_r_mm = self.double_ellipsoid.a_r * 1000
+        b_mm = self.double_ellipsoid.b * 1000
+        c_mm = self.double_ellipsoid.c * 1000
+        x_rel_mm = x_rel * 1000
+        y_mm = (y - y0) * 1000
+        z_mm = z * 1000
+        
+        if x_rel >= 0:  # Front half
+            a = a_f_mm
+            f = self.double_ellipsoid.f_f
+        else:  # Rear half
+            a = a_r_mm
+            f = self.double_ellipsoid.f_r
+            
+        term1 = -3 * (x_rel_mm/a)**2
+        term2 = -3 * (y_mm/b_mm)**2
+        term3 = -3 * (z_mm/c_mm)**2
+        
+        # Calculate heat flux density in W/mm³
+        numerator = 6 * np.sqrt(3) * f * self.double_ellipsoid.Q *self.config["laser"]["reflectivity"]
+        denominator = np.pi * a * b_mm * c_mm
+        q_mm3 = (numerator/denominator) * np.exp(term1 + term2 + term3)
+        
+        # Convert to W/m³ for consistency with other units
+        return q_mm3 *1.0e9
     
+    def apply_initial_heat_source(self):
+        """Apply double ellipsoid heat source as initial condition"""
+        for i in range(1, self.N-1):
+            for j in range(1, self.N-1):
+                for k in range(1, self.N-1):
+                    x = i * self.dx
+                    y = j * self.dx
+                    z = k * self.dx
+                    # Only apply heat within ellipsoid bounds
+                    if (((x-self.double_ellipsoid.position[0])**2/self.double_ellipsoid.a_f**2  <= 1) and 
+                        ((y-self.double_ellipsoid.position[1])**2/self.double_ellipsoid.b**2 <= 1) and
+                        (z**2/self.double_ellipsoid.c**2)) <= 1:
+                        heat_flux = self.double_ellipsoid_source(x, y, z)
+                        # Apply as initial condition with scaling factor
+                        # Convert heat flux (W/m³) to temperature change (K)
+                        # Using: ΔT = q * dt / (ρ * Cp) with dt = 1e-6s
+                        scaling_factor = 2.0e-5  # Equivalent to first time step
+                        self.T[i,j,k] += heat_flux * scaling_factor / (self.material.density * self.material.specific_heat)
+                        # Limit maximum temperature increase to prevent instability
+                        if self.T[i,j,k] > 300 + 3000:  # Max 3000K above ambient
+                            self.T[i,j,k] = 300 + 3000
+                            print(f"Warning: Temperature capped at 3300K at ({x:.2e}, {y:.2e}, {z:.2e})")
+
     def apply_boundary_conditions(self):
         """Apply all boundary conditions to the temperature field"""
 
-        # Apply volumetric heat source  if double ellipsoid is enabled
-        if self.double_ellipsoid.enabled:
-            for i in range(1, self.N-1):
-                for j in range(1, self.N-1):
-                    for k in range(1, self.N-1):
-                        x = i * self.dx
-                        y = j * self.dx
-                        z = k * self.dx
-                        # Only apply heat within ellipsoid bounds
-                        if ((x-self.double_ellipsoid.position[0])**2/self.double_ellipsoid.a_f**2 + 
-                            (y-self.double_ellipsoid.position[1])**2/self.double_ellipsoid.b**2 +
-                            z**2/self.double_ellipsoid.c**2) <= 1:
-                            heat_flux = (1 - self.laser.reflectivity) * self.double_ellipsoid_source(x, y, z)
-                            self.T[i,j,k] += heat_flux * dt / (self.material.density * self.material.specific_heat)
-        else:
-            # Top surface (z = L)
-            for i in range(self.N):
-                for j in range(self.N):
-                    x = i * self.dx
-                    y = j * self.dx
+        # Top surface (z = L)
+        for i in range(self.N):
+            for j in range(self.N):
+                x = i * self.dx
+                y = j * self.dx
+                if  self.double_ellipsoid.enabled:
+                    heat_flux = (1- self.laser.reflectivity) * self.double_ellipsoid_source(x, y,self.dx * (self.N-1))
+                else:
+                    # heat_flux = (1- self.config["laser"]["reflectivity"]) *  self.gaussian_laser_source(x, y)
+                    heat_flux = (1- self.laser.reflectivity) *  self.gaussian_laser_source(x, y)
+                # Apply Neumann condition
+                scaling_factor = 1.0e-1  # Equivalent to first time step
 
-                    heat_flux = (1 - self.laser.reflectivity) * self.gaussian_laser_source(x, y)
-
-                    # Apply Neumann condition
-                    self.T[i,j,-1] = self.T[i,j,-2] + (heat_flux * self.dx / self.material.conductivity)
-
-                    # Optional convective cooling
-                    if self.top_surface.convective_cooling:
-                        temp_diff = self.T[i,j,-1] - self.top_surface.T_inf
-                        if not np.isnan(temp_diff) and np.isfinite(temp_diff):
-                            convective_term = (self.top_surface.h * self.dx / self.material.conductivity) * temp_diff
-                            self.T[i,j,-1] -= convective_term
+                self.T[i,j,-1] = self.T[i,j,-2] + (heat_flux * scaling_factor * self.dx / self.material.conductivity)
+                # Optional convective cooling
+                if self.top_surface.convective_cooling:
+                    temp_diff = self.T[i,j,-1] - self.top_surface.T_inf
+                    if not np.isnan(temp_diff) and np.isfinite(temp_diff):
+                        convective_term = (self.top_surface.h * self.dx / self.material.conductivity) * temp_diff
+                        self.T[i,j,-1] -= convective_term
         
         # Implement boundary conditions for all faces
         for face, bc in self.boundaries.items():
@@ -314,7 +362,8 @@ class HeatSolver3D:
     def calculate_time_step(self) -> float:
         """Calculate stable time step"""
         max_dt = (self.dx**2) / (6 * self.alpha)
-        return min(max_dt, self.simulation.max_dt)
+        # return min(max_dt, self.simulation.max_dt)
+        return max_dt
     
     def update_temperature(self, dt: float):
         """Update temperature field using JIT-accelerated finite difference"""
@@ -345,21 +394,21 @@ class HeatSolver3D:
                     print("WARNING: CUDA failed - falling back to CPU")
                 self.T = _update_temperature_cpu(self.T, factor, self.N)
         
-        # # Apply volumetric heat source if double ellipsoid is enabled
-        # if self.double_ellipsoid.enabled:
-        #     for i in range(1, self.N-1):
-        #         for j in range(1, self.N-1):
-        #             for k in range(1, self.N-1):
-        #                 x = i * self.dx
-        #                 y = j * self.dx
-        #                 z = k * self.dx
-        #                 # Only apply heat within ellipsoid bounds
-        #                 if ((x-self.double_ellipsoid.position[0])**2/self.double_ellipsoid.a_f**2 + 
-        #                     (y-self.double_ellipsoid.position[1])**2/self.double_ellipsoid.b**2 +
-        #                     z**2/self.double_ellipsoid.c**2) <= 1:
-        #                     heat_flux = (1 - self.laser.reflectivity) * self.double_ellipsoid_source(x, y, z)
-        #                     self.T[i,j,k] += heat_flux * dt / (self.material.density * self.material.specific_heat)
-        
+        # Apply volumetric heat source if double ellipsoid is enabled
+        if self.double_ellipsoid.enabled:
+            for i in range(1, self.N-1):
+                for j in range(1, self.N-1):
+                    for k in range(1, self.N-1):
+                        x = i * self.dx
+                        y = j * self.dx
+                        z = k * self.dx
+                        # Only apply heat within ellipsoid bounds
+                        if ((x-self.double_ellipsoid.position[0])**2/self.double_ellipsoid.a_f**2 + 
+                            (y-self.double_ellipsoid.position[1])**2/self.double_ellipsoid.b**2 +
+                            z**2/self.double_ellipsoid.c**2) <= 1:
+                            heat_flux = (1 - self.laser.reflectivity) * self.double_ellipsoid_source(x, y, z)
+                            self.T[i,j,k] += heat_flux * dt / (self.material.density * self.material.specific_heat)
+
         # Validate temperature values
         if np.isnan(self.T).any():
             nan_count = np.isnan(self.T).sum()

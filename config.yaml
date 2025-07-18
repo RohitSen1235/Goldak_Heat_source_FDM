@@ -13,12 +13,12 @@ laser:
 double_ellipsoid:
   enabled: true      # Toggle between heat source models
   Q: 250              # total power (W)
-  a_f: 0.4e-4         # front radius (m)
-  a_r: 1.2e-4         # rear radius (m)
-  b: 1.0e-4           # y-axis radius (m)
+  a_f: 1.0e-4         # front radius (m)
+  a_r: 1.5e-4         # rear radius (m)
+  b: 0.8e-4           # y-axis radius (m)
   c: 1.2e-4           # z-axis radius (m)
-  f_f: 0.6            # Front fraction of power
-  f_r: 1.4            # Rear fraction of power (must satisfy f_f + f_r = 2)
+  f_f: 0.8            # Front fraction of power
+  f_r: 1.2            # Rear fraction of power (must satisfy f_f + f_r = 2)
   position: [0.25e-3, 0.25e-3]  # Center position
 
 top_surface:

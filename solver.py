@@ -214,7 +214,7 @@ class HeatSolver3D:
         y_mm = (y - y0) * 1000
         z_mm = z * 1000
         
-        if y_rel >= 0:  # Front half
+        if x_rel >= 0:  # Front half
             a = a_f_mm
             f = self.double_ellipsoid.f_f
         else:  # Rear half
@@ -265,7 +265,17 @@ class HeatSolver3D:
                 x = i * self.dx
                 y = j * self.dx
                 if  self.double_ellipsoid.enabled:
-                    heat_flux = (1- self.laser.reflectivity) * self.double_ellipsoid_source(x, y, 1.0e-3)
+                    # heat_flux = (1- self.laser.reflectivity) * self.double_ellipsoid_source(x, y, 0.0)
+                    heat_flux = (1- self.laser.reflectivity) * double_ellipsoid_source(x, y, self.L/2 , 
+                                                                                       self.laser.position, 
+                                                                                       self.double_ellipsoid.a_f, 
+                                                                                       self.double_ellipsoid.a_r, 
+                                                                                       self.double_ellipsoid.b, 
+                                                                                       self.double_ellipsoid.c, 
+                                                                                       self.double_ellipsoid.f_f, 
+                                                                                       self.double_ellipsoid.f_r, 
+                                                                                       self.double_ellipsoid.Q, 
+                                                                                       self.laser.reflectivity)
                 else:
                     # heat_flux = (1- self.config["laser"]["reflectivity"]) *  self.gaussian_laser_source(x, y)
                     heat_flux = (1- self.laser.reflectivity) *  self.gaussian_laser_source(x, y)

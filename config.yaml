@@ -1,17 +1,26 @@
 material:
-  conductivity: 80.0  # W/m-K (e.g., for steel)
+  conductivity: 16.2  # W/m-K (e.g., for steel)
   density: 8000.0      # kg/m³  
   specific_heat: 500.0 # J/kg-K
-  melting_temperature: 1100 # K (e.g., steel melting point)
+  melting_temperature: 1400 # K (e.g., steel melting point)
 
 laser:
   power: 250         # Watts
-  spot_size: 1.0e-4    # meters (100 μm, explicitly as float)
+  spot_size: 8.0e-5    # meters (100 μm, explicitly as float)
   position: [0.25e-3, 0.25e-3]  # Center of top surface
   reflectivity: 0.85    # % reflection (1- absorption)
 
+double_ellipsoid:
+  enabled: false      # Toggle between heat source models
+  Q: 250              # Total power (W)
+  a_f: 1.0e-4         # Front ellipsoid radius (m)
+  b: 0.5e-4           # y-axis radius (m)
+  c: 0.5e-4           # z-axis radius (m)
+  f_f: 0.6            # Front fraction of power
+  position: [0.5e-3, 0.5e-3]  # Center position
+
 top_surface:
-  convective_cooling: true
+  convective_cooling: false
   h: 10.0              # W/m²K
   T_inf: 300.0         # K
 
@@ -25,13 +34,15 @@ boundaries:
   right:
     type: adiabatic
   bottom:
-    type: convective
-    h: 5000.0  # W/m²K (high value for heat sink)
-    T_inf: 300.0  # K
+    # type: convective
+    # h: 5000.0  # W/m²K (high value for heat sink)
+    # T_inf: 300.0  # K
+    type: fixed
+    fixed_temp : 300.0 # K
 
 simulation:
   duration: 0.02        # seconds
-  output_interval: 0.005 # seconds
+  output_interval: 0.001 # seconds
   max_dt: 1.0e-4       # seconds
   solver_type: "cuda"  # Options: "auto", "cpu", "cuda"
 

@@ -386,9 +386,9 @@ class HeatSolver3D:
                     y = j * dx
                     z = k * dx
                     # Only apply heat within ellipsoid bounds
-                    if ((x-position[0])**2/a_f**2 + 
-                        (y-position[1])**2/b**2 +
-                        z**2/c**2) <= 1:
+                    if ((x-position[0])**2/a_f**2 <=1 and 
+                        (y-position[1])**2/b**2 <=1 and
+                        (z-0.0)**2/c**2) <= 1:
                         # Call the standalone double_ellipsoid_source function
                         heat_flux = (1 - reflectivity) * double_ellipsoid_source(
                             x, y, z, position, a_f, a_r, b, c, f_f, f_r, Q, reflectivity)

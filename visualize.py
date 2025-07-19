@@ -70,6 +70,23 @@ def visualize_results():
     plotter.enable_trackball_style()
     plotter.enable_terrain_style(mouse_wheel_zooms=True)
     
+    # Add boundary planes
+    bounds = meshes[0].bounds
+    top_plane = pv.Plane(
+        center=[(bounds[1]+bounds[0])/2, (bounds[3]+bounds[2])/2, bounds[5]],
+        direction=[0, 0, -1],
+        i_size=bounds[1]-bounds[0],
+        j_size=bounds[3]-bounds[2]
+    )
+    bottom_plane = pv.Plane(
+        center=[(bounds[1]+bounds[0])/2, (bounds[3]+bounds[2])/2, bounds[4]],
+        direction=[0, 0, 1],
+        i_size=bounds[1]-bounds[0],
+        j_size=bounds[3]-bounds[2]
+    )
+    plotter.add_mesh(top_plane, color='red', opacity=0.5, name='top_face')
+    plotter.add_mesh(bottom_plane, color='blue', opacity=0.5, name='bottom_face')
+
     # Add all timesteps to the plotter
     for mesh in meshes:
         # Add cold region representation

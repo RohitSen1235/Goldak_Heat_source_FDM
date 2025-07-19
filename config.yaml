@@ -7,7 +7,7 @@ material:
 laser:
   power: 250         # Watts
   spot_size: 1e-5    # meters (100 μm, explicitly as float)
-  position: [0.25e-3, 0.25e-3]  # Center of top surface
+  position: [0.25e-3, 0.25e-3, 0.5e-3]  # Center of top surface
   reflectivity: 0.8    # % reflection (1- absorption)
 
 double_ellipsoid:
@@ -43,8 +43,8 @@ boundaries:
     fixed_temp : 300.0 # K
 
 simulation:
-  duration: 0.05        # seconds
-  output_interval: 0.005 # seconds
+  duration: 0.001        # seconds
+  output_interval: 0.0001 # seconds
   max_dt: 1.0e-4       # seconds
   solver_type: "cuda"  # Options: "auto", "cpu", "cuda"
 

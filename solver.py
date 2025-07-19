@@ -6,16 +6,17 @@ from typing import Dict, Optional
 from numba import njit, prange, cuda  # For JIT compilation and parallel loops
 from numba.cuda import is_available as cuda_is_available
 
-@cuda.jit
+@cuda.jit('void(float64[:,:,::1], float64[:,:,::1], float64, int64)')
 def _update_temperature_cuda(T, new_T, factor, N):
-    """
-    CUDA kernel for temperature update
+    """CUDA kernel for parallel temperature field update using finite differences.
+    
     Args:
-        T: Input temperature field (3D array)
-        new_T: Output temperature field (3D array)
-        factor: Thermal diffusion factor
-        N: Grid dimension size
+        T: Input temperature field (3D numpy array)
+        new_T: Output temperature field (3D numpy array)
+        factor: Thermal diffusion factor (dt*alpha/dx^2)
+        N: Grid dimension size (points per dimension)
     """
+
     i, j, k = cuda.grid(ndim=3)
     if 1 <= i < N-1 and 1 <= j < N-1 and 1 <= k < N-1:
         neighbor_avg = (T[i+1,j,k] + T[i-1,j,k] +
@@ -28,12 +29,21 @@ def _update_temperature_cuda(T, new_T, factor, N):
         new_T[i,j,k] = T[i,j,k] + delta
 
 class BoundaryType(Enum):
-    ADIABATIC = "adiabatic"
-    FIXED = "fixed"
-    CONVECTIVE = "convective"
+    """Enumeration of boundary condition types for heat transfer simulation."""
+    ADIABATIC = "adiabatic"  # No heat flux boundary
+    FIXED = "fixed"          # Fixed temperature boundary
+    CONVECTIVE = "convective"  # Convective cooling boundary
 
 @dataclass
 class BoundaryCondition:
+    """Dataclass representing a boundary condition configuration.
+    
+    Attributes:
+        type: Boundary condition type (from BoundaryType enum)
+        fixed_temp: Fixed temperature value (K) for FIXED type
+        h: Heat transfer coefficient (W/m²K) for CONVECTIVE type
+        T_inf: Ambient temperature (K) for CONVECTIVE type
+    """
     type: BoundaryType
     fixed_temp: Optional[float] = None
     h: Optional[float] = None
@@ -41,12 +51,27 @@ class BoundaryCondition:
 
 @dataclass
 class TopSurfaceConfig:
+    """Dataclass for top surface cooling configuration.
+    
+    Attributes:
+        convective_cooling: Whether convective cooling is enabled
+        h: Heat transfer coefficient (W/m²K)
+        T_inf: Ambient temperature (K) for cooling
+    """
     convective_cooling: bool = False
     h: float = 10.0
     T_inf: float = 300.0
 
 @dataclass
 class LaserConfig:
+    """Dataclass for laser heat source configuration.
+    
+    Attributes:
+        power: Laser power (W)
+        spot_size: Beam diameter (m)
+        position: (x,y) coordinates of beam center (m)
+        reflectivity: Surface reflectivity coefficient (0-1)
+    """
     power: float  # Watts
     spot_size: float  # meters
     position: tuple[float, float]  # (x,y) in meters
@@ -54,6 +79,19 @@ class LaserConfig:
 
 @dataclass
 class DoubleEllipsoidConfig:
+    """Dataclass for double ellipsoid (Goldak) heat source configuration.
+    
+    Attributes:
+        enabled: Whether this heat source is active
+        Q: Total power (W)
+        a_f: Front ellipsoid radius (m)
+        a_r: Rear ellipsoid radius (m)
+        b: y-axis radius (m)
+        c: z-axis radius (m)
+        f_f: Front power fraction (must satisfy f_f + f_r = 2)
+        f_r: Rear power fraction
+        position: (x,y) coordinates of heat source center (m)
+    """
     enabled: bool
     Q: float  # Total power (W)
     a_f: float  # Front ellipsoid radius (m)
@@ -66,18 +104,40 @@ class DoubleEllipsoidConfig:
 
 @dataclass
 class MaterialConfig:
+    """Dataclass for material thermal properties.
+    
+    Attributes:
+        conductivity: Thermal conductivity (W/m-K)
+        density: Material density (kg/m³)
+        specific_heat: Specific heat capacity (J/kg-K)
+    """
     conductivity: float  # W/m-K
     density: float  # kg/m³
     specific_heat: float  # J/kg-K
 
 @dataclass
 class SimulationConfig:
+    """Dataclass for simulation time parameters.
+    
+    Attributes:
+        duration: Total simulation time (s)
+        output_interval: Time between output saves (s)
+        max_dt: Maximum allowed time step (s) for stability
+    """
     duration: float  # seconds
     output_interval: float  # seconds
     max_dt: float  # seconds
 
 class HeatSolver3D:
     def __init__(self, config_file: str):
+        """Initialize the 3D heat solver with configuration from YAML file.
+        
+        Args:
+            config_file: Path to YAML configuration file
+            
+        Raises:
+            ValueError: If invalid solver_type is specified
+        """
         self.load_config(config_file)
         self._cuda_available = cuda_is_available()
         if not self._cuda_available:
@@ -90,7 +150,16 @@ class HeatSolver3D:
         
         self.initialize_grid()
         
-    def load_config(self, config_file: str):
+    def load_config(self, config_file: str) -> None:
+        """Load and validate configuration from YAML file.
+        
+        Args:
+            config_file: Path to YAML configuration file
+            
+        Raises:
+            ValueError: If configuration contains invalid values
+            FileNotFoundError: If config file doesn't exist
+        """
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
             
@@ -171,7 +240,15 @@ class HeatSolver3D:
                 T_inf=bc_config.get('T_inf')
             )
             
-    def initialize_grid(self):
+    def initialize_grid(self) -> None:
+        """Initialize the computational grid and temperature field.
+        
+        Sets up:
+        - Grid dimensions (N) and spacing (dx)
+        - Initial temperature field (300K)
+        - Thermal diffusivity (alpha)
+        - Laser position (centered)
+        """
         self.N = self.config['domain']['points_per_dimension']  # Points per dimension
         self.L = self.config['domain']['size']  # Domain size in meters
         self.dx = self.L / (self.N - 1)
@@ -186,22 +263,33 @@ class HeatSolver3D:
         # Calculate thermal diffusivity
         self.alpha = self.material.conductivity / (self.material.density * self.material.specific_heat)
         
-        # # Apply initial heat source if double ellipsoid is enabled
-        # if self.double_ellipsoid.enabled:
-        #     self.apply_initial_heat_source()
-        #     # Debug print temperature range
-        #     print(f"Initial temperature range: {self.T.min():.1f}K to {self.T.max():.1f}K")
-        #     print(f"Max heat source temp: {self.T.max() - 300:.1f}K above ambient")
         
     def gaussian_laser_source(self, x: float, y: float) -> float:
-        """Calculate laser intensity at point (x,y)"""
+        """Calculate Gaussian laser intensity at point (x,y).
+        
+        Args:
+            x: X coordinate (m)
+            y: Y coordinate (m)
+            
+        Returns:
+            Laser intensity (W/m²) at given point
+        """
         x0, y0 = self.laser.position
         w = self.laser.spot_size
         I0 = (2 * self.laser.power) / (np.pi * w**2)
         return I0 * np.exp(-2 * ((x-x0)**2 + (y-y0)**2) / w**2)
 
     def double_ellipsoid_source(self, x: float, y: float, z: float) -> float:
-        """Calculate double ellipsoid heat source at point (x,y,z) using Goldak model"""
+        """Calculate double ellipsoid heat source using Goldak model.
+        
+        Args:
+            x: X coordinate (m)
+            y: Y coordinate (m) 
+            z: Z coordinate (m)
+            
+        Returns:
+            Volumetric heat flux (W/m³) at given point
+        """
         x0, y0 = self.double_ellipsoid.position
         x_rel = x - x0  # Relative x position
         y_rel = y- y0
@@ -233,8 +321,12 @@ class HeatSolver3D:
         # Convert to W/m³ for consistency with other units
         return q_mm3 *1.0e9
     
-    def apply_initial_heat_source(self):
-        """Apply double ellipsoid heat source as initial condition"""
+    def apply_initial_heat_source(self) -> None:
+        """Apply double ellipsoid heat source as initial condition.
+        
+        Modifies the temperature field by applying heat within the ellipsoid bounds.
+        Limits maximum temperature increase to prevent numerical instability.
+        """
         for i in range(1, self.N-1):
             for j in range(1, self.N-1):
                 for k in range(1, self.N-1):
@@ -256,8 +348,14 @@ class HeatSolver3D:
                             self.T[i,j,k] = 300 + 3000
                             print(f"Warning: Temperature capped at 3300K at ({x:.2e}, {y:.2e}, {z:.2e})")
 
-    def apply_boundary_conditions(self):
-        """Apply all boundary conditions to the temperature field"""
+    def apply_boundary_conditions(self) -> None:
+        """Apply all boundary conditions to the temperature field.
+        
+        Handles:
+        - Top surface with optional convective cooling
+        - All other faces (front, back, left, right, bottom)
+        - Supports fixed, adiabatic and convective boundary types
+        """
 
         # Top surface (z = L)
         for i in range(self.N):
@@ -352,8 +450,16 @@ class HeatSolver3D:
                                        (self.T[-1,j,k] - bc.T_inf)
                             self.T[-1,j,k] = self.T[-2,j,k] + conv_term
     
-    def solve(self):
-        """Main solver loop"""
+    def solve(self) -> None:
+        """Run the main simulation loop.
+        
+        Iteratively:
+        1. Calculates time step
+        2. Updates temperature field
+        3. Applies boundary conditions
+        4. Saves output at specified intervals
+        5. Prints progress updates
+        """
         t = 0.0
         output_count = 0
         
@@ -370,7 +476,11 @@ class HeatSolver3D:
                 print(f"Progress: t = {t:.3e}s ({(t/self.simulation.duration)*100:.1f}% complete)", end='\r')
 
     def calculate_time_step(self) -> float:
-        """Calculate stable time step"""
+        """Calculate maximum stable time step using CFL condition.
+        
+        Returns:
+            Maximum stable time step (seconds) based on grid spacing and thermal diffusivity
+        """
         max_dt = (self.dx**2) / (6 * self.alpha)
         # return min(max_dt, self.simulation.max_dt)
         return max_dt
@@ -395,8 +505,16 @@ class HeatSolver3D:
                         T[i,j,k] += heat_flux * dt / (density * specific_heat)
         return T
 
-    def update_temperature(self, dt: float):
-        """Update temperature field using JIT-accelerated finite difference"""
+    def update_temperature(self, dt: float) -> None:
+        """Update temperature field for one time step.
+        
+        Args:
+            dt: Time step size (seconds)
+            
+        Raises:
+            ValueError: If invalid time step or numerical instability detected
+            RuntimeError: If NaN/infinite values appear in temperature field
+        """
         # Pre-calculate constants
         factor = dt * self.alpha / (self.dx**2)
         if factor <= 0 or not np.isfinite(factor):
@@ -457,13 +575,13 @@ class HeatSolver3D:
         self.apply_boundary_conditions()
         
     def calculate_meltpool_dimensions(self, melting_temp: float = None) -> dict:
-        """Calculate meltpool dimensions (length, width, depth) in meters.
+        """Calculate meltpool dimensions (length, width, depth) in micro meters.
         
         Args:
             melting_temp: Optional override of melting temperature (K)
             
         Returns:
-            Dictionary with keys: length, width, depth (in meters)
+            Dictionary with keys: length, width, depth (in micrometers)
         """
         if melting_temp is None:
             melting_temp = self.config['material']['melting_temperature']
@@ -500,8 +618,15 @@ class HeatSolver3D:
             'depth': depth
         }
 
-    def save_output(self, step: int):
-        """Save output in VTK format for ParaView"""
+    def save_output(self, step: int) -> None:
+        """Save current temperature field to VTK file.
+        
+        Args:
+            step: Time step number used in filename
+            
+        Raises:
+            RuntimeError: If temperature field contains invalid values
+        """
         import os
         from pyevtk.hl import gridToVTK
         
@@ -530,7 +655,23 @@ def double_ellipsoid_source(x: float, y: float, z: float,
                           position: tuple[float, float],
                           a_f: float, a_r: float, b: float, c: float,
                           f_f: float, f_r: float, Q: float, reflectivity: float) -> float:
-    """Numba-compatible version of double_ellipsoid_source"""
+    """Numba-compatible version of double ellipsoid heat source calculation.
+    
+    Args:
+        x,y,z: Coordinates (m)
+        position: (x,y) center of heat source (m)
+        a_f: Front ellipsoid radius (m)
+        a_r: Rear ellipsoid radius (m) 
+        b: y-axis radius (m)
+        c: z-axis radius (m)
+        f_f: Front power fraction
+        f_r: Rear power fraction
+        Q: Total power (W)
+        reflectivity: Surface reflectivity (0-1)
+        
+    Returns:
+        Volumetric heat flux (W/m³) at given point
+    """
     x0, y0 = position
     x_rel = x - x0  # Relative x position
     
@@ -563,8 +704,17 @@ def double_ellipsoid_source(x: float, y: float, z: float,
     return q_mm3 * 1.0e9
 
 @njit(parallel=True, fastmath=True)
-def _update_temperature_cpu(T, factor, N):
-    """Numba-optimized temperature update"""
+def _update_temperature_cpu(T: np.ndarray, factor: float, N: int) -> np.ndarray:
+    """Numba-optimized CPU temperature field update.
+    
+    Args:
+        T: Input temperature field (3D array)
+        factor: Thermal diffusion factor (dt*alpha/dx^2)
+        N: Grid dimension size
+        
+    Returns:
+        Updated temperature field (3D array)
+    """
     new_T = np.copy(T)
     
     # More stable computation avoiding large dx2_inv

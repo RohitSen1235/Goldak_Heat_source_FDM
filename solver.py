@@ -1,4 +1,5 @@
 import numpy as np
+import time
 import yaml
 from enum import Enum
 from dataclasses import dataclass
@@ -364,7 +365,7 @@ class HeatSolver3D:
                 y = j * self.dx
                 if  self.double_ellipsoid.enabled:
                     # heat_flux = (1- self.laser.reflectivity) * self.double_ellipsoid_source(x, y, 0.0)
-                    heat_flux = (1- self.laser.reflectivity) * double_ellipsoid_source(x, y, self.L/2 , 
+                    heat_flux = (1- self.laser.reflectivity) * double_ellipsoid_source(x, y, self.L, 
                                                                                        self.laser.position, 
                                                                                        self.double_ellipsoid.a_f, 
                                                                                        self.double_ellipsoid.a_r, 
@@ -606,16 +607,11 @@ class HeatSolver3D:
         width = (np.max(j_coords) - np.min(j_coords)) * self.dx
         depth = (np.max(k_coords) - np.min(k_coords)) * self.dx
         
-        print({
+
+        return {
             'length': float(length*1.0e6),
             'width': float(width*1.0e6),
             'depth': float(depth*1.0e6)
-        })
-
-        return {
-            'length': length,
-            'width': width,
-            'depth': depth
         }
 
     def save_output(self, step: int) -> None:
@@ -744,5 +740,8 @@ def _update_temperature_cpu(T: np.ndarray, factor: float, N: int) -> np.ndarray:
 
 if __name__ == "__main__":
     solver = HeatSolver3D("config.yaml")
+    start_time = time.time()
     solver.solve()
-    solver.calculate_meltpool_dimensions()
+    simulation_time = time.time() - start_time
+    print(f"Simulation completed in : {simulation_time:.6f} Secs")
+    print(f"Meltpool dimensions : {solver.calculate_meltpool_dimensions()}")
